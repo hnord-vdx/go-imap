@@ -4,10 +4,7 @@ go 1.19
 
 require (
 	github.com/StirlingMarketingGroup/go-retry v0.0.0-20190512160921-94a8eb23e893
-	github.com/davecgh/go-spew v1.1.1
-	github.com/dustin/go-humanize v1.0.0
 	github.com/jhillyerd/enmime v0.10.0
-	github.com/logrusorgru/aurora v2.0.3+incompatible
 	github.com/rs/xid v1.4.0
 	golang.org/x/net v0.0.0-20220909164309-bea034e7d591
 )
