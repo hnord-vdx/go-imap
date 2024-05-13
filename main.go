@@ -622,119 +622,115 @@ func (d *Dialer) GetEmails(uids ...int) (emails map[int]*Email, err error) {
 	}
 
 	var records [][]*Token
-	r := retry.NewDefault()
-	r.MaxAttempts = 1
-	err = r.Do(func() (err error) {
-		r, err := d.Exec("UID FETCH "+uidsStr.String()+" BODY.PEEK[]", true, nil)
-		if err != nil {
-			return
-		}
 
-		records, err = d.ParseFetchResponse(r)
-		if err != nil {
-			return
-		}
+	r, err := d.Exec("UID FETCH "+uidsStr.String()+" BODY.PEEK[]", true, nil)
+	if err != nil {
+		return
+	}
 
-		for _, tks := range records {
-			e := &Email{}
-			skip := 0
-			success := true
-			for i, t := range tks {
-				if skip > 0 {
-					skip--
-					continue
-				}
-				if err = d.CheckType(t, []TType{TLiteral}, tks, "in root"); err != nil {
+	records, err = d.ParseFetchResponse(r)
+	if err != nil {
+		return
+	}
+
+	for _, tks := range records {
+		e := &Email{}
+		skip := 0
+		success := true
+		for i, t := range tks {
+			if skip > 0 {
+				skip--
+				continue
+			}
+			if err = d.CheckType(t, []TType{TLiteral}, tks, "in root"); err != nil {
+				return
+			}
+			switch t.Str {
+			case "BODY[]":
+				if err = d.CheckType(tks[i+1], []TType{TAtom}, tks, "after BODY[]"); err != nil {
 					return
 				}
-				switch t.Str {
-				case "BODY[]":
-					if err = d.CheckType(tks[i+1], []TType{TAtom}, tks, "after BODY[]"); err != nil {
-						return
+				msg := tks[i+1].Str
+				r := strings.NewReader(msg)
+
+				env, err := enmime.ReadEnvelope(r)
+				if err != nil {
+					if Verbose {
+						log(d.ConnNum, d.Folder, fmt.Sprintf("email body could not be parsed, skipping: %s", err))
+						fmt.Printf("%+v\n", env)
+						fmt.Printf("%+v\n", msg)
+						// os.Exit(0)
 					}
-					msg := tks[i+1].Str
-					r := strings.NewReader(msg)
+					success = false
 
-					env, err := enmime.ReadEnvelope(r)
-					if err != nil {
-						if Verbose {
-							log(d.ConnNum, d.Folder, fmt.Sprintf("email body could not be parsed, skipping: %s", err))
-							fmt.Printf("%+v\n", env)
-							fmt.Printf("%+v\n", msg)
-							// os.Exit(0)
-						}
-						success = false
+					// continue RecL
+				} else {
 
-						// continue RecL
-					} else {
+					e.Subject = env.GetHeader("Subject")
+					e.Text = env.Text
+					e.HTML = env.HTML
 
-						e.Subject = env.GetHeader("Subject")
-						e.Text = env.Text
-						e.HTML = env.HTML
-
-						if len(env.Attachments) != 0 {
-							for _, a := range env.Attachments {
-								e.Attachments = append(e.Attachments, Attachment{
-									Name:     a.FileName,
-									MimeType: a.ContentType,
-									Content:  a.Content,
-								})
-							}
-						}
-
-						if len(env.Inlines) != 0 {
-							for _, a := range env.Inlines {
-								e.Attachments = append(e.Attachments, Attachment{
-									Name:     a.FileName,
-									MimeType: a.ContentType,
-									Content:  a.Content,
-								})
-							}
-						}
-
-						for _, a := range []struct {
-							dest   *EmailAddresses
-							header string
-						}{
-							{&e.From, "From"},
-							{&e.ReplyTo, "Reply-To"},
-							{&e.To, "To"},
-							{&e.CC, "cc"},
-							{&e.BCC, "bcc"},
-						} {
-							alist, _ := env.AddressList(a.header)
-							(*a.dest) = make(map[string]string, len(alist))
-							for _, addr := range alist {
-								(*a.dest)[strings.ToLower(addr.Address)] = addr.Name
-							}
+					if len(env.Attachments) != 0 {
+						for _, a := range env.Attachments {
+							e.Attachments = append(e.Attachments, Attachment{
+								Name:     a.FileName,
+								MimeType: a.ContentType,
+								Content:  a.Content,
+							})
 						}
 					}
-					skip++
-				case "UID":
-					if err = d.CheckType(tks[i+1], []TType{TNumber}, tks, "after UID"); err != nil {
-						return
+
+					if len(env.Inlines) != 0 {
+						for _, a := range env.Inlines {
+							e.Attachments = append(e.Attachments, Attachment{
+								Name:     a.FileName,
+								MimeType: a.ContentType,
+								Content:  a.Content,
+							})
+						}
 					}
-					e.UID = tks[i+1].Num
-					skip++
+
+					for _, a := range []struct {
+						dest   *EmailAddresses
+						header string
+					}{
+						{&e.From, "From"},
+						{&e.ReplyTo, "Reply-To"},
+						{&e.To, "To"},
+						{&e.CC, "cc"},
+						{&e.BCC, "bcc"},
+					} {
+						alist, _ := env.AddressList(a.header)
+						(*a.dest) = make(map[string]string, len(alist))
+						for _, addr := range alist {
+							(*a.dest)[strings.ToLower(addr.Address)] = addr.Name
+						}
+					}
 				}
-			}
-
-			if success {
-				emails[e.UID].Subject = e.Subject
-				emails[e.UID].From = e.From
-				emails[e.UID].ReplyTo = e.ReplyTo
-				emails[e.UID].To = e.To
-				emails[e.UID].CC = e.CC
-				emails[e.UID].BCC = e.BCC
-				emails[e.UID].Text = e.Text
-				emails[e.UID].HTML = e.HTML
-				emails[e.UID].Attachments = e.Attachments
-			} else {
-				delete(emails, e.UID)
+				skip++
+			case "UID":
+				if err = d.CheckType(tks[i+1], []TType{TNumber}, tks, "after UID"); err != nil {
+					return
+				}
+				e.UID = tks[i+1].Num
+				skip++
 			}
 		}
-		return
-	})
+
+		if success {
+			emails[e.UID].Subject = e.Subject
+			emails[e.UID].From = e.From
+			emails[e.UID].ReplyTo = e.ReplyTo
+			emails[e.UID].To = e.To
+			emails[e.UID].CC = e.CC
+			emails[e.UID].BCC = e.BCC
+			emails[e.UID].Text = e.Text
+			emails[e.UID].HTML = e.HTML
+			emails[e.UID].Attachments = e.Attachments
+		} else {
+			delete(emails, e.UID)
+		}
+	}
 
 	return
 }
@@ -758,27 +754,18 @@ func (d *Dialer) GetOverviews(uids ...int) (emails map[int]*Email, err error) {
 		}
 	}
 
-	var records [][]*Token
-	r := retry.NewDefault()
-	r.MaxAttempts = 1
-	err = r.Do(func() (err error) {
-		r, err := d.Exec("UID FETCH "+uidsStr.String()+" ALL", true, nil)
-		if err != nil {
-			return
-		}
-
-		if len(r) == 0 {
-			return
-		}
-
-		records, err = d.ParseFetchResponse(r)
-		if err != nil {
-			return
-		}
-		return
-	})
+	r, err := d.Exec("UID FETCH "+uidsStr.String()+" ALL", true, nil)
 	if err != nil {
-		return nil, err
+		return
+	}
+
+	if len(r) == 0 {
+		return
+	}
+
+	records, err := d.ParseFetchResponse(r)
+	if err != nil {
+		return
 	}
 
 	emails = make(map[int]*Email, len(uids))
