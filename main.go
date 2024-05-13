@@ -14,7 +14,7 @@ import (
 	"time"
 	"unicode"
 
-	retry "github.com/StirlingMarketingGroup/go-retry"
+	"github.com/chk-n/retry"
 	"github.com/jhillyerd/enmime"
 	"github.com/rs/xid"
 	"golang.org/x/net/html/charset"
@@ -31,9 +31,6 @@ var Verbose = false
 
 // SkipResponses skips printing server responses in verbose mode
 var SkipResponses = false
-
-// RetryCount is the number of times retired functions get retried
-var RetryCount = 10
 
 var lastResp string
 
@@ -181,7 +178,8 @@ func New(cfg Config) (d *Dialer, err error) {
 	nextConnNum++
 	nextConnNumMutex.Unlock()
 
-	err = retry.Retry(func() error {
+	r := retry.NewDefault()
+	err = r.Do(func() error {
 		if Verbose {
 			log(connNum, "", "establishing connection")
 		}
@@ -204,26 +202,13 @@ func New(cfg Config) (d *Dialer, err error) {
 		}
 
 		return d.Login(cfg.Username, cfg.Password)
-	}, RetryCount, func(err error) error {
-		if Verbose {
-			log(connNum, "", "failed to establish connection, retrying shortly")
-			if d != nil && d.conn != nil {
-				d.conn.Close()
-			}
-		}
-		return nil
-	}, func() error {
-		if Verbose {
-			log(connNum, "", "retrying failed connection now")
-		}
-		return nil
 	})
 	if err != nil {
 		if Verbose {
 			log(connNum, "", "failed to establish connection")
-			if d != nil && d.conn != nil {
-				d.conn.Close()
-			}
+		}
+		if d != nil {
+			d.Close()
 		}
 		return nil, err
 	}
@@ -252,18 +237,25 @@ func (d *Dialer) Clone() (d2 *Dialer, err error) {
 }
 
 // Close closes the imap connection
-func (d *Dialer) Close() (err error) {
-	if d.Connected {
-		if Verbose {
-			log(d.ConnNum, d.Folder, "closing connection")
-		}
-		err = d.conn.Close()
-		if err != nil {
-			return fmt.Errorf("imap close: %s", err)
-		}
-		d.Connected = false
+func (d *Dialer) Close() error {
+	if !d.Connected {
+		return nil
 	}
-	return
+
+	if Verbose {
+		log(d.ConnNum, d.Folder, "closing connection")
+	}
+	d.Connected = false
+
+	if d.conn == nil {
+		return nil
+	}
+
+	if err := d.conn.Close(); err != nil {
+		return fmt.Errorf("imap close: %s", err)
+	}
+
+	return nil
 }
 
 // Reconnect closes the current connection (if any) and establishes a new one
@@ -296,9 +288,10 @@ func dropNl(b []byte) []byte {
 var atom = regexp.MustCompile(`{\d+}$`)
 
 // Exec executes the command on the imap connection
-func (d *Dialer) Exec(command string, buildResponse bool, retryCount int, processLine func(line []byte) error) (response string, err error) {
+func (d *Dialer) Exec(command string, buildResponse bool, processLine func(line []byte) error) (response string, err error) {
 	var resp strings.Builder
-	err = retry.Retry(func() (err error) {
+	r := retry.NewDefault()
+	err = r.Do(func() (err error) {
 		tag := []byte(fmt.Sprintf("%X", xid.New()))
 
 		c := fmt.Sprintf("%s %s\r\n", tag, command)
@@ -378,14 +371,6 @@ func (d *Dialer) Exec(command string, buildResponse bool, retryCount int, proces
 			}
 		}
 		return
-	}, retryCount, func(err error) error {
-		if Verbose {
-			log(d.ConnNum, d.Folder, err)
-		}
-		d.Close()
-		return nil
-	}, func() error {
-		return d.Reconnect()
 	})
 	if err != nil {
 		if Verbose {
@@ -406,14 +391,14 @@ func (d *Dialer) Exec(command string, buildResponse bool, retryCount int, proces
 
 // Login attempts to login
 func (d *Dialer) Login(username string, password string) (err error) {
-	_, err = d.Exec(fmt.Sprintf(`LOGIN "%s" "%s"`, AddSlashes.Replace(username), AddSlashes.Replace(password)), false, RetryCount, nil)
+	_, err = d.Exec(fmt.Sprintf(`LOGIN "%s" "%s"`, AddSlashes.Replace(username), AddSlashes.Replace(password)), false, nil)
 	return
 }
 
 // GetFolders returns all folders
 func (d *Dialer) GetFolders() (folders []string, err error) {
 	folders = make([]string, 0)
-	_, err = d.Exec(`LIST "" "*"`, false, RetryCount, func(line []byte) (err error) {
+	_, err = d.Exec(`LIST "" "*"`, false, func(line []byte) (err error) {
 		line = dropNl(line)
 		if b := bytes.IndexByte(line, '\n'); b != -1 {
 			folders = append(folders, string(line[b+1:]))
@@ -528,7 +513,7 @@ func (d *Dialer) GetTotalEmailCountStartingFromExcluding(startFolder string, exc
 
 // SelectFolder selects a folder
 func (d *Dialer) SelectFolder(folder string) (err error) {
-	_, err = d.Exec(`EXAMINE "`+AddSlashes.Replace(folder)+`"`, true, RetryCount, nil)
+	_, err = d.Exec(`EXAMINE "`+AddSlashes.Replace(folder)+`"`, true, nil)
 	if err != nil {
 		return
 	}
@@ -538,7 +523,7 @@ func (d *Dialer) SelectFolder(folder string) (err error) {
 
 // Move a read email to a specified folder
 func (d *Dialer) MoveEmail(uid int, folder string) (err error) {
-	_, err = d.Exec(`UID MOVE `+strconv.Itoa(uid)+` "`+AddSlashes.Replace(folder)+`"`, true, RetryCount, nil)
+	_, err = d.Exec(`UID MOVE `+strconv.Itoa(uid)+` "`+AddSlashes.Replace(folder)+`"`, true, nil)
 	if err != nil {
 		return
 	}
@@ -550,7 +535,7 @@ func (d *Dialer) MoveEmail(uid int, folder string) (err error) {
 func (d *Dialer) GetUIDs(search string) (uids []int, err error) {
 	uids = make([]int, 0)
 	t := []byte{' ', '\r', '\n'}
-	r, err := d.Exec(`UID SEARCH `+search, true, RetryCount, nil)
+	r, err := d.Exec(`UID SEARCH `+search, true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -623,8 +608,10 @@ func (d *Dialer) GetEmails(uids ...int) (emails map[int]*Email, err error) {
 	}
 
 	var records [][]*Token
-	err = retry.Retry(func() (err error) {
-		r, err := d.Exec("UID FETCH "+uidsStr.String()+" BODY.PEEK[]", true, 0, nil)
+	r := retry.NewDefault()
+	r.MaxAttempts = 1
+	err = r.Do(func() (err error) {
+		r, err := d.Exec("UID FETCH "+uidsStr.String()+" BODY.PEEK[]", true, nil)
 		if err != nil {
 			return
 		}
@@ -733,12 +720,6 @@ func (d *Dialer) GetEmails(uids ...int) (emails map[int]*Email, err error) {
 			}
 		}
 		return
-	}, RetryCount, func(err error) error {
-		log(d.ConnNum, d.Folder, err)
-		d.Close()
-		return nil
-	}, func() error {
-		return d.Reconnect()
 	})
 
 	return
@@ -764,8 +745,10 @@ func (d *Dialer) GetOverviews(uids ...int) (emails map[int]*Email, err error) {
 	}
 
 	var records [][]*Token
-	err = retry.Retry(func() (err error) {
-		r, err := d.Exec("UID FETCH "+uidsStr.String()+" ALL", true, 0, nil)
+	r := retry.NewDefault()
+	r.MaxAttempts = 1
+	err = r.Do(func() (err error) {
+		r, err := d.Exec("UID FETCH "+uidsStr.String()+" ALL", true, nil)
 		if err != nil {
 			return
 		}
@@ -779,12 +762,6 @@ func (d *Dialer) GetOverviews(uids ...int) (emails map[int]*Email, err error) {
 			return
 		}
 		return
-	}, RetryCount, func(err error) error {
-		log(d.ConnNum, d.Folder, err)
-		d.Close()
-		return nil
-	}, func() error {
-		return d.Reconnect()
 	})
 	if err != nil {
 		return nil, err

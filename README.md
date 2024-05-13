@@ -130,6 +130,7 @@ func main() {
 ## Built With
 
 - [jhillyerd/enmime](https://github.com/jhillyerd/enmime) - MIME mail encoding and decoding library for Go
+- [chi-n/retry](https://github.com/chk-n/retry) - Simple retry library with exponential backoff and timeouts
 
 ## Authors
 
