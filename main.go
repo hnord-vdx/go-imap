@@ -45,6 +45,7 @@ type Dialer struct {
 	Password  string
 	Host      string
 	Port      int
+	TLSConfig *tls.Config
 	strtokI   int
 	strtok    string
 	Connected bool
@@ -163,10 +164,11 @@ func log(connNum int, folder string, msg interface{}) {
 }
 
 type Config struct {
-	Username string
-	Password string
-	Host     string
-	Port     int
+	Username  string
+	Password  string
+	Host      string
+	Port      int
+	TLSConfig *tls.Config
 }
 
 // New makes a new imap
@@ -184,7 +186,7 @@ func New(cfg Config) (d *Dialer, err error) {
 			log(connNum, "", "establishing connection")
 		}
 		var conn *tls.Conn
-		conn, err = tls.Dial("tcp", cfg.Host+":"+strconv.Itoa(cfg.Port), nil)
+		conn, err = tls.Dial("tcp", cfg.Host+":"+strconv.Itoa(cfg.Port), cfg.TLSConfig)
 		if err != nil {
 			if Verbose {
 				log(connNum, "", fmt.Sprintf("failed to connect: %s", err))
@@ -233,10 +235,11 @@ func New(cfg Config) (d *Dialer, err error) {
 // as the one this is being called on
 func (d *Dialer) Clone() (d2 *Dialer, err error) {
 	d2, err = New(Config{
-		Username: d.Username,
-		Password: d.Password,
-		Host:     d.Host,
-		Port:     d.Port,
+		Username:  d.Username,
+		Password:  d.Password,
+		Host:      d.Host,
+		Port:      d.Port,
+		TLSConfig: d.TLSConfig,
 	})
 	// d2.Verbose = d1.Verbose
 	if d.Folder != "" {
