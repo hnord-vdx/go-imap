@@ -34,14 +34,7 @@ func main() {
 	// along with other things like error messages (before the retry limit is reached)
 	imap.Verbose = true
 
-	// Defaults to 10. Certain functions retry; like the login function, and the new connection function.
-	// If a retried function fails, the connection will be closed, then the program sleeps for an increasing amount of time,
-	// creates a new connection instance internally, selects the same folder, and retries the failed command(s).
-	// You can check out github.com/StirlingMarketingGroup/go-retry for the retry implementation being used
-	imap.RetryCount = 3
-
 	// Create a new instance of the IMAP connection you want to use
-	
 	im, err := imap.New(imap.Config{
 		Username: "username", 
 		Password: "password", 
