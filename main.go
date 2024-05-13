@@ -162,8 +162,15 @@ func log(connNum int, folder string, msg interface{}) {
 	fmt.Printf("%s %s: %s", time.Now().Format("2006-01-02 15:04:05.000000"), name, msg)
 }
 
+type Config struct {
+	Username string
+	Password string
+	Host     string
+	Port     int
+}
+
 // New makes a new imap
-func New(username string, password string, host string, port int) (d *Dialer, err error) {
+func New(cfg Config) (d *Dialer, err error) {
 	nextConnNumMutex.RLock()
 	connNum := nextConnNum
 	nextConnNumMutex.RUnlock()
@@ -177,7 +184,7 @@ func New(username string, password string, host string, port int) (d *Dialer, er
 			log(connNum, "", "establishing connection")
 		}
 		var conn *tls.Conn
-		conn, err = tls.Dial("tcp", host+":"+strconv.Itoa(port), nil)
+		conn, err = tls.Dial("tcp", cfg.Host+":"+strconv.Itoa(cfg.Port), nil)
 		if err != nil {
 			if Verbose {
 				log(connNum, "", fmt.Sprintf("failed to connect: %s", err))
@@ -186,15 +193,15 @@ func New(username string, password string, host string, port int) (d *Dialer, er
 		}
 		d = &Dialer{
 			conn:      conn,
-			Username:  username,
-			Password:  password,
-			Host:      host,
-			Port:      port,
+			Username:  cfg.Username,
+			Password:  cfg.Password,
+			Host:      cfg.Host,
+			Port:      cfg.Port,
 			Connected: true,
 			ConnNum:   connNum,
 		}
 
-		return d.Login(username, password)
+		return d.Login(cfg.Username, cfg.Password)
 	}, RetryCount, func(err error) error {
 		if Verbose {
 			log(connNum, "", "failed to establish connection, retrying shortly")
@@ -225,7 +232,12 @@ func New(username string, password string, host string, port int) (d *Dialer, er
 // Clone returns a new connection with the same connection information
 // as the one this is being called on
 func (d *Dialer) Clone() (d2 *Dialer, err error) {
-	d2, err = New(d.Username, d.Password, d.Host, d.Port)
+	d2, err = New(Config{
+		Username: d.Username,
+		Password: d.Password,
+		Host:     d.Host,
+		Port:     d.Port,
+	})
 	// d2.Verbose = d1.Verbose
 	if d.Folder != "" {
 		err = d2.SelectFolder(d.Folder)
