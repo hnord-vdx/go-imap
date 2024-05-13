@@ -41,7 +41,13 @@ func main() {
 	imap.RetryCount = 3
 
 	// Create a new instance of the IMAP connection you want to use
-	im, err := imap.New("username", "password", "mail.server.com", 993)
+	
+	im, err := imap.New(imap.Config{
+		Username: "username", 
+		Password: "password", 
+		Host: "mail.server.com", 
+		Port: 993,
+		TLSConfig: nil})
 	check(err)
 	defer im.Close()
 
@@ -124,8 +130,6 @@ func main() {
 ## Built With
 
 - [jhillyerd/enmime](https://github.com/jhillyerd/enmime) - MIME mail encoding and decoding library for Go
-- [logrusorgru/aurora](https://github.com/logrusorgru/aurora) - Golang ultimate ANSI-colors that supports Printf/Sprintf methods
-- [dustin/go-humanize](https://github.com/dustin/go-humanize) - Go Humans! (formatters for units to human friendly sizes)
 
 ## Authors
 
