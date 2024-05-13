@@ -179,7 +179,14 @@ func New(cfg Config) (d *Dialer, err error) {
 	nextConnNumMutex.Unlock()
 
 	r := retry.NewDefault()
-	err = r.Do(func() error {
+	err = r.Do(func() (err error) {
+		// on error, reconnect
+		defer func() {
+			if err != nil {
+				d.Reconnect()
+			}
+		}()
+
 		if Verbose {
 			log(connNum, "", "establishing connection")
 		}
@@ -292,6 +299,13 @@ func (d *Dialer) Exec(command string, buildResponse bool, processLine func(line 
 	var resp strings.Builder
 	r := retry.NewDefault()
 	err = r.Do(func() (err error) {
+		// on error, reconnect
+		defer func() {
+			if err != nil {
+				d.Reconnect()
+			}
+		}()
+
 		tag := []byte(fmt.Sprintf("%X", xid.New()))
 
 		c := fmt.Sprintf("%s %s\r\n", tag, command)
@@ -302,7 +316,7 @@ func (d *Dialer) Exec(command string, buildResponse bool, processLine func(line 
 
 		_, err = d.conn.Write([]byte(c))
 		if err != nil {
-			return
+			return err
 		}
 
 		r := bufio.NewReader(d.conn)
@@ -319,19 +333,19 @@ func (d *Dialer) Exec(command string, buildResponse bool, processLine func(line 
 					var n int
 					n, err = strconv.Atoi(string(a[1 : len(a)-1]))
 					if err != nil {
-						return
+						return err
 					}
 
 					buf := make([]byte, n)
 					_, err = io.ReadFull(r, buf)
 					if err != nil {
-						return
+						return err
 					}
 					line = append(line, buf...)
 
 					buf, err = r.ReadBytes('\n')
 					if err != nil {
-						return
+						return err
 					}
 					line = append(line, buf...)
 
@@ -356,21 +370,21 @@ func (d *Dialer) Exec(command string, buildResponse bool, processLine func(line 
 			if len(line) >= taglen+oklen && bytes.Equal(line[:taglen], tag) {
 				if !bytes.Equal(line[taglen+1:taglen+oklen], []byte("OK")) {
 					err = fmt.Errorf("imap command failed: %s", line[taglen+oklen+1:])
-					return
+					return err
 				}
 				break
 			}
 
 			if processLine != nil {
 				if err = processLine(line); err != nil {
-					return
+					return err
 				}
 			}
 			if buildResponse {
 				resp.Write(line)
 			}
 		}
-		return
+		return nil
 	})
 	if err != nil {
 		if Verbose {
