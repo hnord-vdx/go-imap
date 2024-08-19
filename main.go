@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -37,16 +36,15 @@ var lastResp string
 // Dialer is basically an IMAP connection
 type Dialer struct {
 	conn      *tls.Conn
-	Folder    string
-	Username  string
-	Password  string
-	Host      string
-	Port      int
-	TLSConfig *tls.Config
+	folder    string
+	username  string
+	password  string
+	host      string
+	port      int
+	tlsConfig *tls.Config
 	strtokI   int
 	strtok    string
-	Connected bool
-	ConnNum   int
+	logger    logger
 }
 
 // EmailAddresses are a map of email address to names
@@ -147,72 +145,56 @@ func (a Attachment) String() string {
 	return fmt.Sprintf("%s (%s %d)", a.Name, a.MimeType, uint64(len(a.Content)))
 }
 
-var nextConnNum = 0
-var nextConnNumMutex = sync.RWMutex{}
-
-func log(connNum int, folder string, msg interface{}) {
-	var name string
-	if len(folder) != 0 {
-		name = fmt.Sprintf("IMAP%d:%s", connNum, folder)
-	} else {
-		name = fmt.Sprintf("IMAP%d", connNum)
-	}
-	fmt.Printf("%s %s: %s", time.Now().Format("2006-01-02 15:04:05.000000"), name, msg)
-}
-
 type Config struct {
 	Username  string
 	Password  string
 	Host      string
 	Port      int
 	TLSConfig *tls.Config
+	Logger    logger
+}
+
+type logger interface {
+	Errorf(format string, args ...interface{})
+	Logf(format string, args ...interface{})
 }
 
 // New makes a new imap
 func New(cfg Config) (d *Dialer, err error) {
-	nextConnNumMutex.RLock()
-	connNum := nextConnNum
-	nextConnNumMutex.RUnlock()
-
-	nextConnNumMutex.Lock()
-	nextConnNum++
-	nextConnNumMutex.Unlock()
+	if cfg.Logger == nil {
+		cfg.Logger = &defaultLogger{}
+	}
 
 	r := retry.NewDefault()
 	err = r.Do(func() (err error) {
-		// on error, reconnect
-		defer func() {
-			if err != nil {
-				d.Reconnect()
-			}
-		}()
+		// avoid reconnect here as it calls New() again..
 
 		if Verbose {
-			log(connNum, "", "establishing connection")
+			d.log("", "establishing connection")
 		}
+
 		var conn *tls.Conn
 		conn, err = tls.Dial("tcp", cfg.Host+":"+strconv.Itoa(cfg.Port), cfg.TLSConfig)
 		if err != nil {
 			if Verbose {
-				log(connNum, "", fmt.Sprintf("failed to connect: %s", err))
+				d.log("", fmt.Sprintf("failed to connect: %s", err))
 			}
 			return err
 		}
 		d = &Dialer{
-			conn:      conn,
-			Username:  cfg.Username,
-			Password:  cfg.Password,
-			Host:      cfg.Host,
-			Port:      cfg.Port,
-			Connected: true,
-			ConnNum:   connNum,
+			conn:     conn,
+			username: cfg.Username,
+			password: cfg.Password,
+			host:     cfg.Host,
+			port:     cfg.Port,
+			logger:   cfg.Logger,
 		}
 
 		return d.Login(cfg.Username, cfg.Password)
 	})
 	if err != nil {
 		if Verbose {
-			log(connNum, "", "failed to establish connection")
+			d.log("", "failed to establish connection")
 		}
 		if d != nil {
 			d.Close()
@@ -227,15 +209,16 @@ func New(cfg Config) (d *Dialer, err error) {
 // as the one this is being called on
 func (d *Dialer) Clone() (d2 *Dialer, err error) {
 	d2, err = New(Config{
-		Username:  d.Username,
-		Password:  d.Password,
-		Host:      d.Host,
-		Port:      d.Port,
-		TLSConfig: d.TLSConfig,
+		Username:  d.username,
+		Password:  d.password,
+		Host:      d.host,
+		Port:      d.port,
+		TLSConfig: d.tlsConfig,
+		Logger:    d.logger,
 	})
-	// d2.Verbose = d1.Verbose
-	if d.Folder != "" {
-		err = d2.SelectFolder(d.Folder)
+
+	if d.folder != "" {
+		err = d2.SelectFolder(d.folder)
 		if err != nil {
 			return nil, fmt.Errorf("imap clone: %s", err)
 		}
@@ -245,14 +228,9 @@ func (d *Dialer) Clone() (d2 *Dialer, err error) {
 
 // Close closes the imap connection
 func (d *Dialer) Close() error {
-	if !d.Connected {
-		return nil
-	}
-
 	if Verbose {
-		log(d.ConnNum, d.Folder, "closing connection")
+		d.log(d.folder, "closing connection")
 	}
-	d.Connected = false
 
 	if d.conn == nil {
 		return nil
@@ -269,7 +247,7 @@ func (d *Dialer) Close() error {
 func (d *Dialer) Reconnect() (err error) {
 	d.Close()
 	if Verbose {
-		log(d.ConnNum, d.Folder, "reopening connection")
+		d.log(d.folder, "reopening connection")
 	}
 	d2, err := d.Clone()
 	if err != nil {
@@ -311,7 +289,7 @@ func (d *Dialer) Exec(command string, buildResponse bool, processLine func(line 
 		c := fmt.Sprintf("%s %s\r\n", tag, command)
 
 		if Verbose {
-			log(d.ConnNum, d.Folder, strings.Replace(fmt.Sprintf("%s %s", "->", strings.TrimSpace(c)), fmt.Sprintf(`"%s"`, d.Password), `"****"`, -1))
+			d.log(d.folder, strings.Replace(fmt.Sprintf("%s %s", "->", strings.TrimSpace(c)), fmt.Sprintf(`"%s"`, d.password), `"****"`, -1))
 		}
 
 		_, err = d.conn.Write([]byte(c))
@@ -355,7 +333,7 @@ func (d *Dialer) Exec(command string, buildResponse bool, processLine func(line 
 			}
 
 			if Verbose && !SkipResponses {
-				log(d.ConnNum, d.Folder, fmt.Sprintf("<- %s", dropNl(line)))
+				d.log(d.folder, fmt.Sprintf("<- %s", dropNl(line)))
 			}
 
 			// if strings.Contains(string(line), "--00000000000030095105741e7f1f") {
@@ -388,7 +366,7 @@ func (d *Dialer) Exec(command string, buildResponse bool, processLine func(line 
 	})
 	if err != nil {
 		if Verbose {
-			log(d.ConnNum, d.Folder, "All retries failed")
+			d.log(d.folder, "All retries failed")
 		}
 		return "", err
 	}
@@ -474,7 +452,7 @@ func (d *Dialer) GetTotalEmailCountStartingFromExcluding(startFolder string, exc
 		started = false
 	}
 
-	folder := d.Folder
+	folder := d.folder
 
 	folders, err := d.GetFolders()
 	if err != nil {
@@ -531,7 +509,7 @@ func (d *Dialer) SelectFolder(folder string) (err error) {
 	if err != nil {
 		return
 	}
-	d.Folder = folder
+	d.folder = folder
 	return nil
 }
 
@@ -541,7 +519,7 @@ func (d *Dialer) MoveEmail(uid int, folder string) (err error) {
 	if err != nil {
 		return
 	}
-	d.Folder = folder
+	d.folder = folder
 	return nil
 }
 
@@ -656,7 +634,7 @@ func (d *Dialer) GetEmails(uids ...int) (emails map[int]*Email, err error) {
 				env, err := enmime.ReadEnvelope(r)
 				if err != nil {
 					if Verbose {
-						log(d.ConnNum, d.Folder, fmt.Sprintf("email body could not be parsed, skipping: %s", err))
+						d.log(d.folder, fmt.Sprintf("email body could not be parsed, skipping: %s", err))
 						fmt.Printf("%+v\n", env)
 						fmt.Printf("%+v\n", msg)
 						// os.Exit(0)
@@ -870,7 +848,7 @@ func (d *Dialer) GetOverviews(uids ...int) (emails map[int]*Email, err error) {
 
 							// if t.Tokens[EEMailbox].Type == TNil {
 							// 	if Verbose {
-							// 		log(d.ConnNum, d.Folder, Brown("email address has no mailbox name (probably not a real email), skipping"))
+							// 		d.log( d.Folder, Brown("email address has no mailbox name (probably not a real email), skipping"))
 							// 	}
 							// 	continue RecordsL
 							// }
@@ -1169,8 +1147,20 @@ func (d *Dialer) CheckType(token *Token, acceptableTypes []TType, tks []*Token, 
 			}
 			types += GetTokenName(a)
 		}
-		err = fmt.Errorf("IMAP%d:%s: expected %s token %s, got %+v in %v", d.ConnNum, d.Folder, types, fmt.Sprintf(loc, v...), token, tks)
+		err = fmt.Errorf("IMAP:%s: expected %s token %s, got %+v in %v", d.folder, types, fmt.Sprintf(loc, v...), token, tks)
 	}
 
 	return err
+}
+
+// ------- //
+// Helpers //
+// ------- //
+
+func (d *Dialer) log(folder string, msg any) {
+	name := "IMAP"
+	if len(folder) != 0 {
+		name = fmt.Sprintf("IMAP:%s", folder)
+	}
+	d.logger.Logf("%s %s: %s", time.Now().Format("2006-01-02 15:04:05.000000"), name, msg)
 }
